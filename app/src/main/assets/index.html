@@ -87,6 +87,7 @@ input[type=range]{width:95px}
       <div class="metric"><span>WI-FI</span><strong id="wifiValue">--</strong></div>
     </div>
     <div class="hint">TAP THE CENTRAL CORE TO ACTIVATE</div>
+      <div class="hint" id="androidControlStatus" style="margin-top:8px;color:#75c8eb">ANDROID CONTROL: SOLO NELL’APP JARVIS</div>
   </aside>
 
   <main class="panel center">
@@ -115,6 +116,7 @@ input[type=range]{width:95px}
 
   <aside class="panel right">
     <div class="panel-title">Android quick control</div>
+    <div class="voice-controls" style="margin-bottom:10px"><button class="quick" id="accessibilitySetup">ATTIVA ACCESSIBILITY</button></div>
     <div class="voice-controls" style="margin-bottom:12px">
       <button class="quick" data-command="apri WhatsApp">WhatsApp</button>
       <button class="quick" data-command="apri YouTube">YouTube</button>
@@ -140,6 +142,20 @@ input[type=range]{width:95px}
 </div>
 <script>
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const NATIVE = !!(window.AndroidJarvis && AndroidJarvis.nativeVoice && AndroidJarvis.nativeVoice());
+let nativeSpeakDone = null, nativeReply = null;
+window.onNativeSpeakDone = () => { const d = nativeSpeakDone; nativeSpeakDone = null; if (d) d(); };
+window.onNativeReply = reply => { const r = nativeReply; nativeReply = null; if (r) r({reply: reply}); };
+function stopSpeaking() {
+  if (NATIVE) { nativeSpeakDone = null; AndroidJarvis.stopSpeaking(); }
+  else { speechSynthesis.cancel(); }
+}
+function askBrain(t) {
+  if (NATIVE) {
+    return new Promise(resolve => { nativeReply = resolve; AndroidJarvis.ask(t); });
+  }
+  return fetch('/ask', {method: 'POST', body: JSON.stringify({text: t})}).then(r => r.json());
+}
 const hud = document.getElementById('hud');
 const lab = document.getElementById('lab');
 const st = document.getElementById('st');
@@ -214,6 +230,7 @@ speedControl.addEventListener('input', () => {
 });
 
 function speak(t, done) {
+  if (NATIVE) { nativeSpeakDone = done || null; AndroidJarvis.speak(t); return; }
   speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(t);
   u.lang = 'it-IT';
@@ -257,8 +274,53 @@ function localCmd(t) {
   }
   return null;
 }
+function parseAndroidCommand(text) {
+  const t = text.trim();
+  let m;
+  if ((m = t.match(/^(?:jarvis[, ]*)?(?:apri|avvia)\s+(.+)$/i))) return {kind:'open', value:m[1].trim()};
+  if ((m = t.match(/^(?:jarvis[, ]*)?scrivi\s+(.+)$/i))) return {kind:'type_text', value:m[1]};
+  if ((m = t.match(/^(?:jarvis[, ]*)?(?:tocca|premi|clicca)\s+(.+)$/i))) return {kind:'click_text', value:m[1].trim()};
+  if (/^(?:jarvis[, ]*)?scorri\s+(?:giù|giu|in basso)$/i.test(t)) return {kind:'scroll_down', value:''};
+  if (/^(?:jarvis[, ]*)?scorri\s+(?:su|in alto)$/i.test(t)) return {kind:'scroll_up', value:''};
+  if (/^(?:jarvis[, ]*)?(?:indietro|torna indietro)$/i.test(t)) return {kind:'back', value:''};
+  if (/^(?:jarvis[, ]*)?(?:home|schermata iniziale)$/i.test(t)) return {kind:'home', value:''};
+  return null;
+}
+async function runAndroidCommand(cmd) {
+  if (!window.AndroidJarvis) return 'Questa funzione richiede l’app Android JARVIS installata, non Chrome.';
+  if (cmd.kind === 'open') {
+    const result = AndroidJarvis.openApp(cmd.value);
+    if (result.startsWith('OPENING:')) return 'Apro ' + result.substring(7) + '.';
+    return 'Non trovo un’app avviabile chiamata ' + cmd.value + '.';
+  }
+  if (!AndroidJarvis.accessibilityEnabled()) {
+    return 'Il controllo Android non è ancora attivo. Premi ATTIVA ACCESSIBILITY e abilita JARVIS nelle impostazioni Android.';
+  }
+  const result = AndroidJarvis.execute(cmd.kind, cmd.value);
+  const messages = {
+    OK: cmd.kind === 'type_text' ? 'Testo inserito nel campo selezionato.' : 'Comando eseguito.',
+    NO_FOCUSED_TEXT_FIELD: 'Prima seleziona il campo in cui vuoi scrivere.',
+    TEXT_NOT_FOUND_OR_NOT_CLICKABLE: 'Non trovo un elemento cliccabile con quel testo.',
+    NO_SCROLL_TARGET: 'Non trovo una schermata scorrevole.',
+    NO_ACTIVE_WINDOW: 'Non riesco a vedere la schermata attiva.',
+    ACCESSIBILITY_OFF: 'Il servizio Accessibilità non è attivo.',
+    APP_NOT_FOUND: 'Non trovo quell’app.'
+  };
+  return messages[result] || 'Il comando non è riuscito: ' + result;
+}
+
 async function send(t) {
   add('Tu', t);
+  if (NATIVE && /^(?:jarvis[, ]*)?cambia chiave$/i.test(t.trim())) { AndroidJarvis.changeKey(); resume(); return; }
+  const androidCmd = parseAndroidCommand(t);
+  if (androidCmd) {
+    state('thinking');
+    const reply = await runAndroidCommand(androidCmd);
+    add('JARVIS', reply);
+    state('speaking');
+    speak(reply, resume);
+    return;
+  }
   const lc = localCmd(t);
   if (lc !== null) {
     add('JARVIS', lc);
@@ -269,8 +331,7 @@ async function send(t) {
   state('thinking');
   st.textContent = '';
   try {
-    const r = await fetch('/ask', {method: 'POST', body: JSON.stringify({text: t})});
-    const d = await r.json();
+    const d = await askBrain(t);
     add('JARVIS', d.reply);
     state('speaking');
     speak(d.reply, resume);
@@ -279,30 +340,57 @@ async function send(t) {
     resume();
   }
 }
-if (!SR) {
+if (!SR && !NATIVE) {
   st.textContent = 'Questo browser non supporta il microfono. Usa Chrome.';
 } else {
-  rec = new SR();
-  rec.lang = 'it-IT';
-  rec.interimResults = false;
-  rec.onstart = () => { state('listening'); st.textContent = 'Tocca il cerchio per fermare'; };
-  rec.onresult = e => { busy = true; send(e.results[0][0].transcript); };
-  rec.onend = () => { if (active && !busy) setTimeout(listen, 300); };
-  rec.onerror = e => {
-    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-      active = false;
-      unlock();
-      state('idle');
-      st.textContent = 'Microfono non consentito.';
-    } else if (e.error !== 'no-speech' && e.error !== 'aborted') {
-      st.textContent = 'Errore microfono: ' + e.error;
-    }
-  };
+  if (NATIVE) {
+    rec = {
+      start() { AndroidJarvis.startListening(); },
+      abort() { AndroidJarvis.stopListening(); }
+    };
+    window.onNativeListening = () => { state('listening'); st.textContent = 'Tocca il cerchio per fermare'; };
+    window.onNativeSpeech = text => { busy = true; send(text); };
+    window.onNativeListenEnd = () => { if (active && !busy) setTimeout(listen, 300); };
+    window.onNativeSpeechError = code => {
+      if (code === 'permission') {
+        active = false;
+        unlock();
+        state('idle');
+        st.textContent = 'Microfono non consentito. Concedi il permesso e riprova.';
+      } else if (code === 'unavailable') {
+        active = false;
+        unlock();
+        state('idle');
+        st.textContent = 'Riconoscimento vocale non disponibile su questo tablet.';
+      } else if (code === 'network') {
+        st.textContent = 'Errore di rete nel riconoscimento vocale.';
+      } else if (code !== 'silence' && code !== 'busy' && code !== 'aborted') {
+        st.textContent = 'Errore microfono: ' + code;
+      }
+    };
+  } else {
+    rec = new SR();
+    rec.lang = 'it-IT';
+    rec.interimResults = false;
+    rec.onstart = () => { state('listening'); st.textContent = 'Tocca il cerchio per fermare'; };
+    rec.onresult = e => { busy = true; send(e.results[0][0].transcript); };
+    rec.onend = () => { if (active && !busy) setTimeout(listen, 300); };
+    rec.onerror = e => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        active = false;
+        unlock();
+        state('idle');
+        st.textContent = 'Microfono non consentito.';
+      } else if (e.error !== 'no-speech' && e.error !== 'aborted') {
+        st.textContent = 'Errore microfono: ' + e.error;
+      }
+    };
+  }
   hud.onclick = () => {
     if (active) {
       active = false;
       busy = false;
-      speechSynthesis.cancel();
+      stopSpeaking();
       try { rec.abort(); } catch (e) {}
       unlock();
       state('idle');
@@ -342,6 +430,12 @@ state = function(s) {
 };
 
 async function updateDashboard() {
+  if (NATIVE) {
+    const b = AndroidJarvis.battery();
+    document.getElementById('batteryValue').textContent = b < 0 ? 'NON DISP.' : b + '%';
+    document.getElementById('wifiValue').textContent = 'NON DISP.';
+    return;
+  }
   try {
     const r = await fetch('/status', {cache:'no-store'});
     if (!r.ok) throw new Error('status');
@@ -357,6 +451,19 @@ async function updateDashboard() {
 }
 updateDashboard();
 setInterval(updateDashboard, 15000);
+
+const androidStatus = document.getElementById('androidControlStatus');
+function refreshAndroidStatus() {
+  if (!window.AndroidJarvis) { androidStatus.textContent = 'ANDROID CONTROL: APRI JARVIS APP'; return; }
+  androidStatus.textContent = AndroidJarvis.accessibilityEnabled() ? 'ANDROID CONTROL: ATTIVO' : 'ANDROID CONTROL: AUTORIZZAZIONE NECESSARIA';
+}
+const accessibilitySetup = document.getElementById('accessibilitySetup');
+if (accessibilitySetup) accessibilitySetup.addEventListener('click', () => {
+  if (window.AndroidJarvis) AndroidJarvis.openAccessibilitySettings();
+  else { st.textContent = 'Apri questa interfaccia dall’app Android JARVIS per attivare il controllo.'; }
+});
+refreshAndroidStatus();
+setInterval(refreshAndroidStatus, 2000);
 
 document.querySelectorAll('.quick').forEach(button => {
   button.addEventListener('click', () => send(button.dataset.command));
