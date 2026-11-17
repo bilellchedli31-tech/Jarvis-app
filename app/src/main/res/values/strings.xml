@@ -1,0 +1,3 @@
+<resources>
+    <string name="jarvis_accessibility_description">Permette a JARVIS di eseguire solo i comandi espliciti richiesti: toccare elementi con etichetta, scorrere e scrivere nel campo già selezionato. I contenuti dello schermo non vengono salvati né inviati.</string>
+</resources>
